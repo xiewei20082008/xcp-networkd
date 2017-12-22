@@ -667,13 +667,11 @@ module Fcoe = struct
 end
 
 module SRIOV = struct
-    let call ?(log=false) args =
-        call_script ~log_successful_output:log ~timeout:(Some 10.0) !sriov_plugin args
                 
     let get_capabilities name =
         try
-            let output = call ["--capable"; name] in
-            if String.trim output = "1" then ["sriov"] else []
+        	(* TBA after Wei's change *)
+            ["sriov"]
         with _ ->
             debug "Failed to get SRIOV support status on device %s" name;
             []
