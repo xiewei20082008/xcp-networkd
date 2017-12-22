@@ -1,0 +1,17 @@
+(executable
+ ((name sriov)
+  (flags (:standard -bin-annot))
+  (libraries (profiling
+              stdext
+              re.perl
+              oUnit
+              networklibs
+              xapi-test-utils)
+  )
+ )
+)
+
+(alias
+ ((name    main)
+  (deps    (sriov.exe))
+  (action  (chdir ../../.. (run ${<})))))

@@ -6,6 +6,7 @@
   (libraries (astring
               forkexec
               rpclib
+              re.perl
               systemd
               threads
               xapi-stdext-unix
