@@ -1217,6 +1217,12 @@ let parse_modprobe_conf_internal file_path driver max_vfs =
 	let new_conf = List.map parse_single_line lines |> String.concat "\n" in
 	!has_probe_conf, !need_rebuild_initrd, new_conf
 
+(*
+returns ( a * b * c) where
+a indicates the probe configuration already has the max_vfs options, meaning the device doesn't support sysfs and will be configed by modprobe
+b indicates some changes shall be made on the coniguration to enable sriov to max_vfs, so we shall rebuild the initrd.
+and c is the configurations after these changes
+*)
 let parse_modprobe_conf driver max_vfs =
 	let file_path = (Printf.sprintf "/etc/modprobe.d/%s.conf"  driver) in
 	parse_modprobe_conf_internal file_path driver max_vfs
@@ -1256,13 +1262,12 @@ let enable_internal dev =
 		| None -> raise (Sys_error ("cannot get driver name for " ^ dev)) in
 	let has_probe_conf, need_rebuild_intrd, conf = parse_modprobe_conf dev config_t.max_vfs in
 	let enable_sriov_via_modprobe ()=
-		match has_probe_conf with
-		| true -> 
+		if has_probe_conf then
 		begin
 			Unixext.write_string_to_file (Printf.sprintf "/etc/modprobe.d/%s.conf" driver) conf;
 			if need_rebuild_intrd then ignore(rebuild_initrd ()); (*ok of modprobe*)
 		end
-		| false ->
+		else
 		begin
 			conf ^ "\n" ^ (Printf.sprintf "options %s max_vfs=%d" driver config_t.max_vfs) ^ "\n"
 			|> Unixext.write_string_to_file (Printf.sprintf "/etc/modprobe.d/%s.conf" driver);
@@ -1275,10 +1280,13 @@ let enable_internal dev =
 		enable_sriov_via_sysfs dev config_t.max_vfs;
 		(*try out of range and mmio error here*)
 		if is_sriov_enabled dev then ()  (*ok of sysfs*)
-		else enable_sriov_via_modprobe ()
+		else 
+			debug "%s does not support sysfs interfaces, trying modprobe" dev;
+			enable_sriov_via_modprobe ()
 	end
 	| _ ->
 	begin
+		debug "enable SR-IOV on a device: %s that has been already enabled" dev;
 		match has_probe_conf with
 		| false -> () (*ok of sysfs*)
 		| true -> 
