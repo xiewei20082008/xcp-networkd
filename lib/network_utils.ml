@@ -1257,18 +1257,19 @@ module Sriov = struct
 			info.num_vfs <> 0
 		with _ -> false
 
+	let get_driver dev =
+		match (Sysfs.get_driver_name dev) with
+		| Some driver -> driver
+		| None -> raise (Sys_error ("cannot get driver name for " ^ dev))
 	let enable_internal dev =
 		let config_t = get_lspci_output dev |> get_sriov_info in
-		let driver =  
-			match (Sysfs.get_driver_name dev) with
-			| Some driver -> driver
-			| None -> raise (Sys_error ("cannot get driver name for " ^ dev)) in
+		let driver =  get_driver dev in
 		let has_probe_conf, need_rebuild_intrd, conf = parse_modprobe_conf dev config_t.max_vfs in
-		let get_modprobe_action_result () =
+		(* let get_modprobe_action_result () =
 			match is_sriov_enabled dev with
 			| true -> Ok Modprobe_successful
 			| false -> Ok Modprobe_successful_requires_reboot
-		in
+		in *)
 		let enable_sriov_via_modprobe ()=
 			if has_probe_conf then
 			begin
@@ -1285,21 +1286,24 @@ module Sriov = struct
 		match config_t.num_vfs with
 		| 0 -> 
 		begin
-			(* try *)
-			enable_sriov_via_sysfs dev config_t.max_vfs;
-			(* with
-			| Sys_error s -> 
-				begin
-					if Xstringext.String.has_substr s "out of range of" then Error Bus_out_of_range
-					else if Xstringext.String.has_substr s "not enough MMIO resources" then Error Not_enough_mmio_resources
-				end *)
-			if is_sriov_enabled dev then Ok Sysfs_successful
-			else 
-			(
-				debug "%s does not support sysfs interfaces, trying modprobe" dev;
-				enable_sriov_via_modprobe ();
-				get_modprobe_action_result()
-			)
+			match
+				try enable_sriov_via_sysfs dev config_t.max_vfs;None
+				with
+				| Sys_error s when Xstringext.String.has_substr s "out of range of" -> Some (Error Bus_out_of_range)  
+				| Sys_error s when Xstringext.String.has_substr s "not enough MMIO resources" -> Some (Error Not_enough_mmio_resources)
+				| _ -> None 
+			with
+			| Some a -> a
+			| None ->
+			begin
+				if is_sriov_enabled dev then Ok Sysfs_successful
+				else 
+				(
+					debug "%s does not support sysfs interfaces, trying modprobe" dev;
+					enable_sriov_via_modprobe ();
+					Ok Modprobe_successful_requires_reboot
+				)
+			end
 		end
 		| _ ->
 		begin
@@ -1311,5 +1315,12 @@ module Sriov = struct
 				if need_rebuild_intrd then ignore(rebuild_initrd ());
 				Ok Modprobe_successful
 		end
-
+	let disable_internal dev =
+		let driver = get_driver dev in
+		let has_probe_conf, need_rebuild_intrd, conf = parse_modprobe_conf dev 0 in
+		try
+			enable_sriov_via_sysfs dev 0;
+			Unixext.write_string_to_file (Printf.sprintf "/etc/modprobe.d/%s.conf" driver) conf;
+			if need_rebuild_intrd then ignore(rebuild_initrd ());
+		with exn -> ()
 end
