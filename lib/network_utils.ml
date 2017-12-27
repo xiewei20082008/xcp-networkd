@@ -13,6 +13,8 @@
  *)
 
 open Xapi_stdext_pervasives
+open Xapi_stdext_unix
+open Xapi_stdext_std
 
 open Network_interface
 
@@ -31,6 +33,10 @@ let brctl = ref "/sbin/brctl"
 let modprobe = "/sbin/modprobe"
 let ethtool = ref "/sbin/ethtool"
 let bonding_dir = "/proc/net/bonding/"
+let lspci = "/sbin/lspci"
+let uname = "/usr/bin/uname"
+let dracut = "/sbin/dracut"
+let rebuild_initrd_timeout = ref 120.0
 let fcoedriver = ref "/opt/xensource/libexec/fcoe_driver"
 let sriov_plugin = ref "/opt/xensource/libexec/network_sriov"
 let inject_igmp_query_script = ref "/usr/libexec/xenopsd/igmp_query_injector.py"
@@ -76,6 +82,10 @@ let fork_script script args =
 		Forkhelpers.dontwaitpid pid;
 	in
 	check_n_run fork_script_internal script args
+
+let is_regex_match regexp str = 
+    try Re_str.search_forward regexp str 0; true
+    with Not_found -> false
 
 module Sysfs = struct
 	let list () =
@@ -209,6 +219,13 @@ module Sysfs = struct
 		|> (fun p -> try read_one_line p |> duplex_of_string with _ -> Duplex_unknown)
 		in (speed, duplex)
 
+	let get_dev_nums_with_same_driver driver = 
+		try
+			Sys.readdir ("/sys/bus/pci/drivers/" ^ driver)
+			|> Array.to_list
+			|> List.filter (is_regex_match (Re_str.regexp "[0-9]+:[0-9]+:[0-9]+\.[0-9]+"))
+			|> List.length
+		with _ -> 0
 end
 
 module Ip = struct
@@ -664,17 +681,6 @@ module Fcoe = struct
 		with _ ->
 			debug "Failed to get fcoe support status on device %s" name;
 			[]
-end
-
-module SRIOV = struct
-                
-    let get_capabilities name =
-        try
-        	(* TBA after Wei's change *)
-            ["sriov"]
-        with _ ->
-            debug "Failed to get SRIOV support status on device %s" name;
-            []
 end
 
 module Sysctl = struct
@@ -1174,4 +1180,178 @@ module Ethtool = struct
 	let set_offload name options =
 		if options <> [] then
 			ignore (call ~log:true ("-K" :: name :: (List.concat (List.map (fun (k, v) -> [k; v]) options))))
+end
+
+module Sriov = struct
+	type t = {
+		max_vfs: int;
+		num_vfs: int;
+	}
+
+	let rebuild_initrd () =
+		let img_name = call_script uname ["-r"] |> String.trim in
+		ignore(call_script ~timeout:(Some !rebuild_initrd_timeout) dracut 
+			["-f"; Printf.sprintf "/boot/initrd-%s.img" img_name; img_name])
+	
+	let gen_options_for_maxvfs driver max_vfs =
+		let gen_list value repeat = 
+			let rec aux acc = function
+				| n when n <= 0 -> acc
+				| n -> aux (value :: acc) (n-1)
+			in
+			aux [] repeat
+		in
+		Sysfs.get_dev_nums_with_same_driver driver
+		|> gen_list (string_of_int max_vfs)
+		|> String.concat ","
+
+	(* For given driver like igb, we parse each line of igb.conf which is the modprobe
+	configuration for igb. We keep the same the lines that do not have SRIOV configurations and 
+	change lines that need to be changed with patterns like `options igb max_vfs=4`
+	*)
+	let parse_modprobe_conf_internal file_path driver option =
+		(* Initially I did not use ref here, but afterward changed to ref to make the code easy to read *)
+		let has_probe_conf = ref false in
+		let need_rebuild_initrd = ref false in
+		let parse_single_line s = 
+			let parse_driver_options s = 
+				match Xstringext.String.split ~limit:2 '=' s with
+				(* has SRIOV configuration but the max_vfs is exactly what we want to set, so no changes and return s *)
+				| [k; v] when k = "max_vfs" && v = option ->  has_probe_conf := true; s
+				(* has SRIOV configuration and we need change it to expected option *)
+				| [k; v] when k = "max_vfs"  -> 
+					has_probe_conf := true;
+					need_rebuild_initrd := true;
+					debug "change SRIOV options from [%s=%s] to [%s=%s]" k v k option;
+					Printf.sprintf "max_vfs=%s" option
+				(* we do not care the lines without SRIOV configurations *)
+				| _ -> s
+			in
+			let trimed_s = String.trim s in
+			if Re_str.string_match (Re_str.regexp ("options[ \t]+" ^ driver)) trimed_s 0 then 
+				let driver_options = Re_str.split (Re_str.regexp "[ \t]+") trimed_s in
+				List.map parse_driver_options driver_options
+				|> String.concat " "
+			else
+				trimed_s
+		in
+		let lines = try Unixext.read_lines file_path with _ -> [] in
+		let new_conf = List.map parse_single_line lines in
+		!has_probe_conf, !need_rebuild_initrd, new_conf
+
+	(*
+	returns ( a * b * c) where
+	a indicates the probe configuration already has the max_vfs options, meaning the device doesn't support sysfs and will be configed by modprobe
+	b indicates some changes shall be made on the coniguration to enable sriov to max_vfs, so we shall rebuild the initrd.
+	and c is the configurations after these changes
+	*)
+	let parse_modprobe_conf driver max_vfs =
+		let file_path = Printf.sprintf "/etc/modprobe.d/%s.conf" driver in
+		let option = gen_options_for_maxvfs driver max_vfs in
+		parse_modprobe_conf_internal file_path driver option
+
+	let get_sriov_info lspci_output =
+		if (is_regex_match (Re_str.regexp "Capabilities:.+SR-IOV" )) lspci_output then
+		begin
+			try 
+				Re_str.search_forward (Re_str.regexp "Total VFs: \([0-9]+\), Number of VFs: \([0-9]+\)") lspci_output 0;
+				{max_vfs = (int_of_string (Re_str.matched_group 1 lspci_output)) - 1;
+					num_vfs = (int_of_string (Re_str.matched_group 2 lspci_output))}
+			with _ -> {max_vfs=0; num_vfs=0}
+		end
+		else
+			{max_vfs=0; num_vfs=0}
+
+	let get_lspci_output dev = 
+		call_script lspci ["-vv"; "-s"; (Sysfs.get_pcibuspath dev)]
+
+	let get_capabilities dev = 
+		try
+			let info = get_lspci_output dev |> get_sriov_info in
+			if info.max_vfs = 0 then [] else ["sriov"]
+		with _ -> []
+
+
+	let set_sriov_via_sysfs dev num_vfs =
+		let interface = Printf.sprintf "/sys/class/net/%s/device/sriov_numvfs" dev in
+		let oc = open_out interface in
+		let check_vf_numbers dev num_vfs = 
+			try
+				let info = get_lspci_output dev |> get_sriov_info in
+				info.num_vfs = num_vfs 
+			with _ -> false
+		in
+		try
+			Pervasiveext.finally (fun () ->
+				output_string oc (string_of_int num_vfs))
+				(fun () -> close_out oc);
+			if check_vf_numbers dev num_vfs then Ok Sysfs_successful
+			else begin
+					debug "%s: no exceptions but fail to set SRIOV" dev;
+					Error (Unknown "unable to enable via sysfs")
+			end
+		with
+		| Sys_error s when Xstringext.String.has_substr s "out of range of" -> Error Bus_out_of_range
+		| Sys_error s when Xstringext.String.has_substr s "not enough MMIO resources" -> Error Not_enough_mmio_resources
+		| e ->
+			debug "%s: set sriov error with exception %s" dev (Printexc.to_string e);
+			Error (Unknown "unable to enable via sysfs")
+
+	let get_driver dev =
+		match (Sysfs.get_driver_name dev) with
+		| Some driver -> driver
+		| None -> raise (Sys_error ("cannot get driver name for " ^ dev))
+
+	let write_conf_file driver content=
+		Unixext.write_string_to_file (Printf.sprintf "/etc/modprobe.d/%s.conf" driver) (String.concat "\n" content)
+
+	let enable_internal dev =
+		let config_t = get_lspci_output dev |> get_sriov_info in
+		let driver =  get_driver dev in
+		let has_probe_conf, need_rebuild_initrd, conf = parse_modprobe_conf driver config_t.max_vfs in
+		let enable_sriov_via_modprobe ()=
+			match has_probe_conf, need_rebuild_initrd with
+			| true, true ->
+				write_conf_file driver conf;
+				rebuild_initrd ()
+			| false, false -> 
+				let new_option_line = Printf.sprintf "options %s max_vfs=%s" driver (gen_options_for_maxvfs driver config_t.max_vfs) in
+				write_conf_file driver (conf @ [new_option_line]);
+				rebuild_initrd ()
+			| _ -> ()
+		in
+		if config_t.max_vfs = 0 then raise (Sys_error (Printf.sprintf "%s: do not have sriov capabilities" dev));
+		if config_t.num_vfs = 0 then begin
+			debug "enable SR-IOV on a device: %s that is disabled" dev;
+			match set_sriov_via_sysfs dev config_t.max_vfs with
+			| Ok _ as r -> r
+			| Error Unknown _ ->
+				debug "%s does not support sysfs interfaces, trying modprobe" dev;
+				enable_sriov_via_modprobe ();
+				Ok Modprobe_successful_requires_reboot
+			| Error _ as e -> e
+		end
+		else begin
+			debug "enable SR-IOV on a device: %s that has been already enabled" dev;
+			match has_probe_conf with
+			| false -> Ok Sysfs_successful
+			| true -> 
+				enable_sriov_via_modprobe ();
+				Ok Modprobe_successful
+		end
+
+	let disable_internal dev =
+		let best_effort_disable () = 
+			try
+				let driver = get_driver dev in
+				let has_probe_conf, need_rebuild_intrd, conf = parse_modprobe_conf driver 0 in
+				match has_probe_conf,need_rebuild_intrd with
+				| false, false -> set_sriov_via_sysfs dev 0; ()
+				| true, true ->
+					write_conf_file driver conf;
+					rebuild_initrd ()
+				| _ -> ()
+			with e -> debug "%s: best effort disable sriov with exn: %s" dev (Printexc.to_string e);()
+		in
+		best_effort_disable(); Ok Disable_successful
 end

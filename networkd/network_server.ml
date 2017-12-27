@@ -372,7 +372,7 @@ module Interface = struct
 		Debug.with_thread_associated dbg (fun () ->
 			List.concat
 			[ Fcoe.get_capabilities name
-			; SRIOV.get_capabilities name
+			; Network_utils.Sriov.get_capabilities name
 			]
 		) ()
 
@@ -1002,26 +1002,23 @@ module Bridge = struct
 end
 
 module Sriov = struct
-	open Xcp_pci.Pci
+	open Xcp_pci
 
 	let enable _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->
 			debug "Enable NET-SRIOV by name: %s" name;
-			(* TBA *)
-			Ok Sysfs_successful
+			Network_utils.Sriov.enable_internal name
 		) ()
 
 	let disable _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->	
 			debug "Disable NET-SRIOV by name: %s" name;
-			(* TBA *)
-			Ok Disable_successful
+			Network_utils.Sriov.disable_internal name
 		) ()
 
-	let make_vf_config _ dbg ~pci_info ~vf_info =
+	let make_vf_config _ dbg ~pci_address ~vf_info =
 		Debug.with_thread_associated dbg (fun () ->	
-			debug "Change VF pci address : %04x:%02x:%02x.%01x"
-				pci_info.address.domain pci_info.address.bus pci_info.address.dev pci_info.address.fn;
+			debug "Config VF with pci address: %s" (string_of_address pci_address);
 			(* TBA *)
 			()
 		) ()
