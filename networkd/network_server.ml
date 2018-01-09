@@ -1018,9 +1018,9 @@ module Sriov = struct
 
 	let make_vf_config _ dbg ~pci_address ~vf_info =
 		Debug.with_thread_associated dbg (fun () ->	
-			debug "Config VF with pci address: %s" (string_of_address pci_address);
-			(* TBA *)
-			()
+			let pcibuspath = string_of_address pci_address in
+			debug "Config VF with pci address: %s" pcibuspath;
+			Network_utils.Sriov.make_vf_conf_internal pcibuspath vf_info
 		) ()
 end
 

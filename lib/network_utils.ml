@@ -34,6 +34,7 @@ let modprobe = "/sbin/modprobe"
 let ethtool = ref "/sbin/ethtool"
 let bonding_dir = "/proc/net/bonding/"
 let lspci = "/sbin/lspci"
+let ip = "/sbin/ip"
 let uname = "/usr/bin/uname"
 let dracut = "/sbin/dracut"
 let rebuild_initrd_timeout = ref 120.0
@@ -226,6 +227,29 @@ module Sysfs = struct
 			|> List.filter (is_regex_match (Re_str.regexp "[0-9]+:[0-9]+:[0-9]+\.[0-9]+"))
 			|> List.length
 		with _ -> 0
+
+	let parent_device_of_vf pcibuspath =
+		try
+			let pf_net_path = Printf.sprintf "/sys/bus/pci/devices/%s/physfn/net" pcibuspath in
+			let devices = Sys.readdir pf_net_path in
+			if Array.length devices = 1 then devices.(0)
+			else raise (Sys_error ("Can not get parent device for " ^ pcibuspath))
+		with _ -> raise (Sys_error ("Can not get parent device for " ^ pcibuspath))
+
+	let device_index_of_vf parent_device pcibuspath =
+		try
+			let re = Re_perl.compile_pat "virtfn(\d+)" in
+			let device_path = getpath parent_device "device" in
+			let group = Sys.readdir device_path
+				|> Array.to_list
+				|> List.filter (Re.execp re) (* List elements are like "virtfn1" *)
+				|> List.find (fun x -> Xstringext.String.has_substr (Unix.readlink (device_path ^ "/" ^ x)) pcibuspath )
+				|> Re.exec_opt re
+			in
+			match group with
+			| None -> raise (Sys_error ("Can not get device index for " ^ pcibuspath))
+			| Some x -> int_of_string (Re.Group.get x 1)
+		with _ -> raise (Sys_error ("Can not get device index for " ^ pcibuspath))
 end
 
 module Ip = struct
@@ -1354,4 +1378,24 @@ module Sriov = struct
 			with e -> debug "%s: best effort disable sriov with exn: %s" dev (Printexc.to_string e);()
 		in
 		best_effort_disable(); Ok Disable_successful
+
+	let make_vf_conf_internal pcibuspath (vf_info : Sriov.sriov_pci_t) =
+		let config_mac dev index  = function
+			| Some mac_addr -> ignore(call_script ip ["link"; "set"; dev; "vf"; string_of_int index; "mac"; mac_addr])
+			| None -> ()
+		and config_vlan dev index  = function
+			| Some vlan -> ignore(call_script ip ["link"; "set"; dev; "vf"; string_of_int index; "vlan"; vlan |> Int64.to_int |> string_of_int])
+			| None -> ()
+		and config_rate dev index  = function
+			| Some rate -> ignore(call_script ip ["link"; "set"; dev; "vf"; string_of_int index; "rate"; rate |> Int64.to_int |> string_of_int])
+			| None -> ()
+		in
+		let dev = Sysfs.parent_device_of_vf pcibuspath in
+		let index = Sysfs.device_index_of_vf dev pcibuspath in
+		config_mac dev index vf_info.mac;
+		config_vlan dev index vf_info.vlan;
+		try
+			(* Some NICs do not support config rate limiting, best-effort manner *)
+			config_rate dev index vf_info.rate;
+		with _ -> info "VF: %s - the type of NIC doesn't support config rate limiting" pcibuspath
 end
