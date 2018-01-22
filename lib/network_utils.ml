@@ -1409,4 +1409,16 @@ module Sriov = struct
 			Modprobe.write_conf_file driver conf >>= fun () ->
 			Dracut.rebuild_initrd ()
 		| _ -> Ok ()
+
+	let make_vf_conf_internal pcibuspath mac vlan rate =
+		let exe_except_none f = function
+			| None -> Result.Ok ()
+			| Some a -> f a
+		in
+		Sysfs.parent_device_of_vf pcibuspath >>= fun dev ->
+		Sysfs.device_index_of_vf dev pcibuspath >>= fun index ->
+		exe_except_none (Ip.set_vf_mac dev index) mac >>= fun () ->
+		exe_except_none (Ip.set_vf_vlan dev index) vlan >>= fun () ->
+		exe_except_none (Ip.set_vf_rate dev index) rate >>= fun () ->
+		Result.Ok ()
 end

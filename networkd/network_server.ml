@@ -1018,29 +1018,17 @@ module Sriov = struct
 		Debug.with_thread_associated dbg (fun () ->	
 			debug "Disable NET-SRIOV by name: %s" name;
 			match Network_utils.Sriov.disable_internal name with
-			| Ok t -> (Ok:disable_result)
+			| Ok () -> (Ok:disable_result)
 			| Result.Error (_, msg) -> Error msg
 		) ()
 
-	let make_vf_conf_internal pcibuspath (vf_info : Sriov.sriov_pci_t) =
-		let exe_except_none f = function
-			| None -> Result.Ok ()
-			| Some a -> f a
-		in
-		let vlan = Opt.map Int64.to_int vf_info.vlan
-		and rate = Opt.map Int64.to_int vf_info.rate in
-		Sysfs.parent_device_of_vf pcibuspath >>= fun dev ->
-		Sysfs.device_index_of_vf dev pcibuspath >>= fun index ->
-		exe_except_none (Ip.set_vf_mac dev index) vf_info.mac >>= fun () ->
-		exe_except_none (Ip.set_vf_vlan dev index) vlan >>= fun () ->
-		exe_except_none (Ip.set_vf_rate dev index) rate >>= fun () ->
-		Result.Ok ()
-
-	let make_vf_config _ dbg ~pci_address ~vf_info =
+	let make_vf_config _ dbg ~pci_address ~(vf_info : Sriov.sriov_pci_t)=
 		Debug.with_thread_associated dbg (fun () ->	
-			let pcibuspath = Xcp_pci.string_of_address pci_address in
+			let vlan = Opt.map Int64.to_int vf_info.vlan
+			and rate = Opt.map Int64.to_int vf_info.rate
+			and pcibuspath = Xcp_pci.string_of_address pci_address in
 			debug "Config VF with pci address: %s" pcibuspath;
-			match make_vf_conf_internal pcibuspath vf_info with
+			match Network_utils.Sriov.make_vf_conf_internal pcibuspath vf_info.mac vlan rate with
 			| Result.Ok () -> (Ok:config_result)
 			| Result.Error (Fail_to_set_vf_rate, msg) -> 
 				debug "%s" msg;
