@@ -14,6 +14,8 @@
 
 open Network_utils
 open Network_interface
+open Rresult.R.Infix
+open Xapi_stdext_monadic
 
 module D = Debug.Make(struct let name = "network_server" end)
 open D
@@ -374,7 +376,7 @@ module Interface = struct
 
 	let get_capabilities _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->
-			Fcoe.get_capabilities name
+			Fcoe.get_capabilities name @ Network_utils.Sriov.get_capabilities name
 		) ()
 
 	let is_connected _ dbg ~name =
@@ -1003,24 +1005,47 @@ module Bridge = struct
 end
 
 module Sriov = struct
-	open Xcp_pci
 
 	let enable _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->
 			debug "Enable NET-SRIOV by name: %s" name;
-			Ok Modprobe_successful
+			match Network_utils.Sriov.enable_internal name with
+			| Ok t -> (Ok t:enable_result)
+			| Result.Error (_, msg) -> Error msg
 		) ()
 
 	let disable _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->	
 			debug "Disable NET-SRIOV by name: %s" name;
-			Ok Modprobe_successful
+			match Network_utils.Sriov.disable_internal name with
+			| Ok t -> (Ok:disable_result)
+			| Result.Error (_, msg) -> Error msg
 		) ()
+
+	let make_vf_conf_internal pcibuspath (vf_info : Sriov.sriov_pci_t) =
+		let exe_except_none f = function
+			| None -> Result.Ok ()
+			| Some a -> f a
+		in
+		let vlan = Opt.map Int64.to_int vf_info.vlan
+		and rate = Opt.map Int64.to_int vf_info.rate in
+		Sysfs.parent_device_of_vf pcibuspath >>= fun dev ->
+		Sysfs.device_index_of_vf dev pcibuspath >>= fun index ->
+		exe_except_none (Ip.set_vf_mac dev index) vf_info.mac >>= fun () ->
+		exe_except_none (Ip.set_vf_vlan dev index) vlan >>= fun () ->
+		exe_except_none (Ip.set_vf_rate dev index) rate >>= fun () ->
+		Result.Ok ()
 
 	let make_vf_config _ dbg ~pci_address ~vf_info =
 		Debug.with_thread_associated dbg (fun () ->	
-			let pcibuspath = string_of_address pci_address in
+			let pcibuspath = Xcp_pci.string_of_address pci_address in
 			debug "Config VF with pci address: %s" pcibuspath;
+			match make_vf_conf_internal pcibuspath vf_info with
+			| Result.Ok () -> (Ok:config_result)
+			| Result.Error (Fail_to_set_vf_rate, msg) -> 
+				debug "%s" msg;
+				Error Config_vf_rate_not_supported
+			| Result.Error (_, msg) -> debug "%s" msg; Error (Unknown msg)
 		) ()
 end
 
