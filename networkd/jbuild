@@ -20,6 +20,7 @@
   (libraries (forkexec
               netlink
               networklibs
+              re.perl
               profiling
               rpclib
               rpclib.unix
