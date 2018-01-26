@@ -120,6 +120,11 @@ let need_enic_workaround () =
 		| Some vs -> (is_older_version vs !enic_workaround_until_version ())
 		| None -> false )
 
+module Sriov = struct
+
+	let get_capabilities dev = 
+		if Sysfs.get_sriov_maxvfs dev = 0 then [] else ["sriov"]
+
 module Interface = struct
 	let get_config name =
 		get_config !config.interface_config default_interface name
@@ -374,7 +379,7 @@ module Interface = struct
 
 	let get_capabilities _ dbg ~name =
 		Debug.with_thread_associated dbg (fun () ->
-			Fcoe.get_capabilities name
+			Fcoe.get_capabilities name @ Sriov.get_capabilities name
 		) ()
 
 	let is_connected _ dbg ~name =
